@@ -1,0 +1,34 @@
+## .NET / MSBuild
+bin/
+obj/
+publish/
+
+## NuGet
+*.nupkg
+*.snupkg
+*.nuget.props
+*.nuget.targets
+
+## User-specific files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+
+## Rider / JetBrains
+.idea/
+*.sln.iml
+
+## VS Code
+.vscode/
+
+## OS
+.DS_Store
+Thumbs.db
+
+## Secrets / environment
+.env
+*.env
+secrets.json
+appsettings.*.local.json
