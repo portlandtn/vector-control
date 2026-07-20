@@ -1,0 +1,22 @@
+[Unit]
+Description=Vector event notification service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+WorkingDirectory=/opt/vector-notifier
+ExecStart=/usr/bin/dotnet /opt/vector-notifier/vector-notifier.dll
+EnvironmentFile=/etc/vector-notifier.env
+Environment=ASPNETCORE_URLS=http://127.0.0.1:5055
+Environment=VECTOR_NOTIFIER_DB=/var/lib/vector-notifier/notifier.db
+User=vector-notifier
+Group=vector-notifier
+StateDirectory=vector-notifier
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

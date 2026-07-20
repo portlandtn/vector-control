@@ -1,319 +1,72 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Options;
 
 var builder = WebApplication.CreateBuilder(args);
-
-builder.Services.AddHttpClient("wirepod", client =>
+builder.Configuration.AddEnvironmentVariables();
+builder.Services.Configure<NotifierOptions>(builder.Configuration.GetSection(NotifierOptions.Section));
+builder.Services.PostConfigure<NotifierOptions>(o =>
 {
-    client.BaseAddress = new Uri("http://192.168.50.205:8080");
+    o.ApiKey = Environment.GetEnvironmentVariable("VECTOR_NOTIFIER_API_KEY") ?? o.ApiKey;
+    o.WirePod.BaseUrl = Environment.GetEnvironmentVariable("WIREPOD_BASE_URL") ?? o.WirePod.BaseUrl;
+    o.WirePod.Serial = Environment.GetEnvironmentVariable("VECTOR_SERIAL") ?? o.WirePod.Serial;
+});
+builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddSingleton<EventStore>();
+builder.Services.AddSingleton<EventProcessor>();
+builder.Services.AddHttpClient<VectorClient>((sp,client) => client.BaseAddress=new Uri(sp.GetRequiredService<IOptions<NotifierOptions>>().Value.WirePod.BaseUrl));
+builder.Services.AddHostedService<NotificationWorker>();
+builder.Services.AddHostedService<CleanupWorker>();
+
+var app=builder.Build();
+var options=app.Services.GetRequiredService<IOptions<NotifierOptions>>().Value;
+if(string.IsNullOrWhiteSpace(options.ApiKey)) throw new InvalidOperationException("VECTOR_NOTIFIER_API_KEY or Notifier:ApiKey is not configured.");
+var githubSecret=Environment.GetEnvironmentVariable("GITHUB_WEBHOOK_SECRET") ?? builder.Configuration["GitHub:WebhookSecret"];
+if(string.IsNullOrWhiteSpace(githubSecret)) throw new InvalidOperationException("GITHUB_WEBHOOK_SECRET or GitHub:WebhookSecret is not configured.");
+await app.Services.GetRequiredService<EventStore>().InitializeAsync();
+
+bool Authorized(HttpRequest r) => r.Headers.TryGetValue("X-Api-Key",out var supplied) && FixedEquals(supplied.ToString(),options.ApiKey);
+
+app.MapPost("/vector/events",async (HttpRequest http,NotificationEventRequest request,EventProcessor processor,CancellationToken ct) =>
+{
+    if(!Authorized(http)) return Results.Unauthorized();
+    var errors=processor.Validate(request); if(errors.Count>0) return Results.BadRequest(new { error="Invalid event.", errors });
+    var decision=await processor.ProcessAsync(request,ct);
+    return decision.Accepted ? Results.Accepted(value:new { success=true,outcome=decision.Outcome,reason=decision.Reason,eventId=decision.EventId }) : Results.Ok(new { success=true,outcome=decision.Outcome,reason=decision.Reason });
 });
 
-var app = builder.Build();
-
-var expectedApiKey =
-    Environment.GetEnvironmentVariable("VECTOR_NOTIFIER_API_KEY");
-
-var githubWebhookSecret =
-    Environment.GetEnvironmentVariable("GITHUB_WEBHOOK_SECRET");
-
-if (string.IsNullOrWhiteSpace(expectedApiKey))
+app.MapPost("/vector/say",async (HttpRequest http,SayRequest request,VectorClient vector,CancellationToken ct) =>
 {
-    throw new InvalidOperationException(
-        "VECTOR_NOTIFIER_API_KEY is not configured.");
-}
-
-if (string.IsNullOrWhiteSpace(githubWebhookSecret))
-{
-    throw new InvalidOperationException(
-        "GITHUB_WEBHOOK_SECRET is not configured.");
-}
-
-app.MapPost("/vector/say", async (
-    HttpRequest httpRequest,
-    SayRequest request,
-    IHttpClientFactory httpClientFactory,
-    CancellationToken cancellationToken) =>
-{
-    if (!httpRequest.Headers.TryGetValue("X-Api-Key", out var providedApiKey) ||
-        providedApiKey != expectedApiKey)
-    {
-        return Results.Unauthorized();
-    }
-
-    if (string.IsNullOrWhiteSpace(request.Text))
-    {
-        return Results.BadRequest(new
-        {
-            error = "Text is required."
-        });
-    }
-
-    var result = await SpeakAsync(
-        request.Text,
-        httpClientFactory,
-        cancellationToken);
-
-    return result.Success
-        ? Results.Ok(new { success = true, spoken = request.Text })
-        : Results.Problem(
-            title: "Vector communication failed",
-            detail: result.Error,
-            statusCode: StatusCodes.Status502BadGateway);
+    if(!Authorized(http)) return Results.Unauthorized();
+    if(string.IsNullOrWhiteSpace(request.Text)) return Results.BadRequest(new { error="Text is required." });
+    var envelope=new NotificationEnvelope(0,"manual","vector.say","info","quiet",request.Text,"manual",null,null,DateTimeOffset.UtcNow);
+    var result=await vector.DeliverAsync(envelope,ct);
+    return result.Success ? Results.Ok(new { success=true,spoken=request.Text }) : Results.Problem(title:"Vector communication failed",detail:"Vector is currently unavailable.",statusCode:502);
 });
 
-app.MapPost("/github/webhook", async (
-    HttpRequest request,
-    IHttpClientFactory httpClientFactory,
-    CancellationToken cancellationToken) =>
+app.MapPost("/github/webhook",async (HttpRequest request,EventProcessor processor,CancellationToken ct) =>
 {
-    request.EnableBuffering();
-
-    using var reader = new StreamReader(
-        request.Body,
-        Encoding.UTF8,
-        detectEncodingFromByteOrderMarks: false,
-        leaveOpen: true);
-
-    var payload = await reader.ReadToEndAsync(cancellationToken);
-    request.Body.Position = 0;
-
-    if (!request.Headers.TryGetValue(
-            "X-Hub-Signature-256",
-            out var signatureHeader))
-    {
-        return Results.Unauthorized();
-    }
-
-    var expectedSignature = CreateGitHubSignature(
-        payload,
-        githubWebhookSecret);
-
-    if (!CryptographicOperations.FixedTimeEquals(
-            Encoding.UTF8.GetBytes(signatureHeader.ToString()),
-            Encoding.UTF8.GetBytes(expectedSignature)))
-    {
-        return Results.Unauthorized();
-    }
-
-    var eventName =
-        request.Headers["X-GitHub-Event"].ToString();
-
-    using var document = JsonDocument.Parse(payload);
-
-    var message = BuildGitHubMessage(
-        eventName,
-        document.RootElement);
-
-    if (message is null)
-    {
-        return Results.Ok(new
-        {
-            success = true,
-            ignored = true,
-            eventName
-        });
-    }
-
-    var result = await SpeakAsync(
-        message,
-        httpClientFactory,
-        cancellationToken);
-
-    return result.Success
-        ? Results.Ok(new
-        {
-            success = true,
-            eventName,
-            spoken = message
-        })
-        : Results.Problem(
-            title: "Vector communication failed",
-            detail: result.Error,
-            statusCode: StatusCodes.Status502BadGateway);
+    request.EnableBuffering(); using var reader=new StreamReader(request.Body,Encoding.UTF8,false,leaveOpen:true); var payload=await reader.ReadToEndAsync(ct); request.Body.Position=0;
+    if(!request.Headers.TryGetValue("X-Hub-Signature-256",out var signature)||!VerifyGitHubSignature(payload,signature.ToString(),githubSecret)) return Results.Unauthorized();
+    var eventName=request.Headers["X-GitHub-Event"].ToString(); var delivery=request.Headers["X-GitHub-Delivery"].ToString();
+    try {
+        using var document=JsonDocument.Parse(payload); var normalized=GitHubEventFactory.Build(eventName,delivery,document.RootElement);
+        if(normalized is null) return Results.Ok(new { success=true,ignored=true,eventName });
+        var decision=await processor.ProcessAsync(normalized,ct);
+        return Results.Accepted(value:new { success=true,eventName,outcome=decision.Outcome,reason=decision.Reason });
+    } catch(JsonException) { return Results.BadRequest(new { error="Invalid JSON payload." }); }
 });
+
+app.MapGet("/health/live",()=>Results.Ok(new { status="live" }));
+app.MapGet("/health/ready",async (EventStore store,VectorClient vector,CancellationToken ct) =>
+{ var storage=await store.PingAsync(ct); var reachable=await vector.IsReachableAsync(ct); return storage&&reachable ? Results.Ok(new { status="ready",api=true,storage=true,vector=true }) : Results.Json(new { status="degraded",api=true,storage,vector=reachable },statusCode:503); });
 
 app.Run();
 
-static string CreateGitHubSignature(
-    string payload,
-    string secret)
-{
-    var keyBytes = Encoding.UTF8.GetBytes(secret);
-    var payloadBytes = Encoding.UTF8.GetBytes(payload);
+static bool FixedEquals(string supplied,string expected)
+{ var a=Encoding.UTF8.GetBytes(supplied); var b=Encoding.UTF8.GetBytes(expected); return a.Length==b.Length&&CryptographicOperations.FixedTimeEquals(a,b); }
+static bool VerifyGitHubSignature(string payload,string supplied,string secret)
+{ using var hmac=new HMACSHA256(Encoding.UTF8.GetBytes(secret)); var expected=$"sha256={Convert.ToHexString(hmac.ComputeHash(Encoding.UTF8.GetBytes(payload))).ToLowerInvariant()}"; return FixedEquals(supplied,expected); }
 
-    using var hmac = new HMACSHA256(keyBytes);
-    var hash = hmac.ComputeHash(payloadBytes);
-
-    return $"sha256={Convert.ToHexString(hash).ToLowerInvariant()}";
-}
-
-static string? BuildGitHubMessage(
-    string eventName,
-    JsonElement payload)
-{
-    var repository = payload
-        .GetProperty("repository")
-        .GetProperty("name")
-        .GetString() ?? "a repository";
-
-    return eventName switch
-    {
-        "ping" =>
-            $"Jed, GitHub is connected to Vector for {repository}.",
-
-        "push" =>
-            $"Jed, new code was pushed to {repository}.",
-
-        "pull_request" =>
-            BuildPullRequestMessage(payload, repository),
-
-        "issues" =>
-            BuildIssueMessage(payload, repository),
-
-        "workflow_run" =>
-            BuildWorkflowMessage(payload, repository),
-
-        _ => null
-    };
-}
-
-static string? BuildPullRequestMessage(
-    JsonElement payload,
-    string repository)
-{
-    var action = payload.GetProperty("action").GetString();
-    var pullRequest = payload.GetProperty("pull_request");
-    var number = pullRequest.GetProperty("number").GetInt32();
-
-    if (action == "closed" &&
-        pullRequest.GetProperty("merged").GetBoolean())
-    {
-        return $"Jed, pull request {number} was merged in {repository}.";
-    }
-
-    if (action == "opened")
-    {
-        return $"Jed, pull request {number} was opened in {repository}.";
-    }
-
-    return null;
-}
-
-static string? BuildIssueMessage(
-    JsonElement payload,
-    string repository)
-{
-    var action = payload.GetProperty("action").GetString();
-    var issue = payload.GetProperty("issue");
-    var number = issue.GetProperty("number").GetInt32();
-
-    return action switch
-    {
-        "opened" =>
-            $"Jed, issue {number} was created in {repository}.",
-
-        "assigned" =>
-            $"Jed, issue {number} was assigned in {repository}.",
-
-        "closed" =>
-            $"Jed, issue {number} was closed in {repository}.",
-
-        _ => null
-    };
-}
-
-static string? BuildWorkflowMessage(
-    JsonElement payload,
-    string repository)
-{
-    var action = payload.GetProperty("action").GetString();
-
-    if (action != "completed")
-    {
-        return null;
-    }
-
-    var workflowRun = payload.GetProperty("workflow_run");
-    var workflowName =
-        workflowRun.GetProperty("name").GetString()
-        ?? "A GitHub workflow";
-
-    var conclusion =
-        workflowRun.GetProperty("conclusion").GetString();
-
-    return conclusion switch
-    {
-        "success" =>
-            $"{workflowName} succeeded in {repository}. Against all odds, the computers behaved.",
-
-        "failure" =>
-            $"Jed, {workflowName} failed in {repository}. The build server has chosen violence.",
-
-        "cancelled" =>
-            $"{workflowName} was cancelled in {repository}. Probably for the best.",
-
-        _ => null
-    };
-}
-
-static async Task<SpeakResult> SpeakAsync(
-    string text,
-    IHttpClientFactory httpClientFactory,
-    CancellationToken cancellationToken)
-{
-    var client = httpClientFactory.CreateClient("wirepod");
-    const string serial = "007064c9";
-
-    var assumeUrl =
-        $"/api-sdk/assume_behavior_control?priority=high&serial={serial}";
-
-    var speakUrl =
-        $"/api-sdk/say_text?text={Uri.EscapeDataString(text)}&serial={serial}";
-
-    var releaseUrl =
-        $"/api-sdk/release_behavior_control?serial={serial}";
-
-    try
-    {
-        using var assumeResponse =
-            await client.PostAsync(
-                assumeUrl,
-                content: null,
-                cancellationToken);
-
-        assumeResponse.EnsureSuccessStatusCode();
-
-        await Task.Delay(2000, cancellationToken);
-
-        using var speakResponse =
-            await client.PostAsync(
-                speakUrl,
-                content: null,
-                cancellationToken);
-
-        speakResponse.EnsureSuccessStatusCode();
-
-        await Task.Delay(5000, cancellationToken);
-
-        using var releaseResponse =
-            await client.PostAsync(
-               releaseUrl,
-                content: null,
-                cancellationToken);
-
-        //releaseResponse.EnsureSuccessStatusCode();
-
-        return new SpeakResult(true, null);
-    }
-    catch (HttpRequestException ex)
-    {
-        return new SpeakResult(false, ex.Message);
-    }
-}
-
-public sealed record SayRequest(string Text);
-
-public sealed record SpeakResult(
-    bool Success,
-    string? Error);
+public partial class Program { }
