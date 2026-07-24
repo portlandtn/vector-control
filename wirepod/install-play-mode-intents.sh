@@ -38,7 +38,7 @@ upsert_intent() {
   printf '\n'
 }
 
-upsert_intent "Izzy play mode" "Pause notifications and start a curated Izzy play session" '["go play with izzy","go play with easy"]' "/vector/mode/play"
+upsert_intent "Izzy play mode" "Pause notifications and start a curated Izzy play session" '["go play with izzy","go play with easy","go play with isabella"]' "/vector/mode/play"
 upsert_intent "Vector work mode" "Stop the Izzy play session and resume notifications" '["enter work mode"]' "/vector/mode/work"
 
 echo "Wire-Pod play/work intents are configured."
