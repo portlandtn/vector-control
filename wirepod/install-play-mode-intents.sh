@@ -15,7 +15,7 @@ existing="$(curl -fsS "$wirepod/api/get_custom_intents_json" 2>/dev/null || prin
 upsert_intent() {
   local name="$1"
   local description="$2"
-  local utterance="$3"
+  local utterances="$3"
   local endpoint="$4"
   local lua payload number
 
@@ -23,9 +23,9 @@ upsert_intent() {
   payload="$(jq -n \
     --arg name "$name" \
     --arg description "$description" \
-    --arg utterance "$utterance" \
+    --argjson utterances "$utterances" \
     --arg lua "$lua" \
-    '{name:$name,description:$description,utterances:[$utterance],intent:"intent_system_noaudio",params:{paramname:"",paramvalue:""},exec:"/bin/true",execargs:[],luascript:$lua}')"
+    '{name:$name,description:$description,utterances:$utterances,intent:"intent_system_noaudio",params:{paramname:"",paramvalue:""},exec:"/bin/true",execargs:[],luascript:$lua}')"
   number="$(jq -r --arg name "$name" 'to_entries[] | select(.value.name==$name) | .key+1' <<<"$existing" | head -n 1)"
 
   if [[ -n "$number" ]]; then
@@ -38,7 +38,7 @@ upsert_intent() {
   printf '\n'
 }
 
-upsert_intent "Izzy play mode" "Pause notifications and start a curated Izzy play session" "go play with izzy" "/vector/mode/play"
-upsert_intent "Vector work mode" "Stop the Izzy play session and resume notifications" "enter work mode" "/vector/mode/work"
+upsert_intent "Izzy play mode" "Pause notifications and start a curated Izzy play session" '["go play with izzy","go play with easy"]' "/vector/mode/play"
+upsert_intent "Vector work mode" "Stop the Izzy play session and resume notifications" '["enter work mode"]' "/vector/mode/work"
 
 echo "Wire-Pod play/work intents are configured."
