@@ -22,5 +22,45 @@ public sealed class EventProcessorTests : IAsyncLifetime
     [Fact] public async Task PersistenceSurvivesStoreRestart() { await _processor.ProcessAsync(Event("persist"),default); var wrapped=Options.Create(_options); var restarted=new EventStore(wrapped,TimeProvider.System,NullLogger<EventStore>.Instance); await restarted.InitializeAsync(); var processor=new EventProcessor(restarted,wrapped,TimeProvider.System,NullLogger<EventProcessor>.Instance); Assert.Equal("duplicate",(await processor.ProcessAsync(Event("persist"),default)).Reason); }
     [Fact] public async Task QuietHoursQueuesNoncriticalAndBypassesCritical() { _options.QuietHoursStart=new(0,0); _options.QuietHoursEnd=new(23,59); Assert.Equal("quiet_hours",(await _processor.ProcessAsync(Event("quiet"),default)).Reason); Assert.Null((await _processor.ProcessAsync(Event("critical") with { Severity="critical" },default)).Reason); }
 
+    [Fact]
+    public async Task PlayModePersistsAndPausesNotificationIterations()
+    {
+        var wrapped=Options.Create(_options);
+        var modes=new PlayModeCoordinator(_store,wrapped,TimeProvider.System,NullLogger<PlayModeCoordinator>.Instance);
+        await modes.InitializeAsync(TestContext.Current.CancellationToken);
+        Assert.True((await modes.EnterPlayModeAsync(TestContext.Current.CancellationToken)).Changed);
+
+        var ran=false;
+        Assert.False(await modes.RunNotificationIterationAsync(() => { ran=true; return Task.CompletedTask; },TestContext.Current.CancellationToken));
+        Assert.False(ran);
+
+        var restarted=new PlayModeCoordinator(_store,wrapped,TimeProvider.System,NullLogger<PlayModeCoordinator>.Instance);
+        await restarted.InitializeAsync(TestContext.Current.CancellationToken);
+        Assert.True(restarted.IsPlayMode);
+        Assert.True((await restarted.EnterWorkModeAsync(TestContext.Current.CancellationToken)).Changed);
+        Assert.True(await restarted.RunNotificationIterationAsync(() => { ran=true; return Task.CompletedTask; },TestContext.Current.CancellationToken));
+        Assert.True(ran);
+    }
+
+    [Fact]
+    public async Task PlayModeExpiresBackToWorkMode()
+    {
+        _options.PlayMode.SessionMinutes=1;
+        var clock=new ManualTimeProvider(DateTimeOffset.Parse("2026-07-24T12:00:00Z"));
+        var modes=new PlayModeCoordinator(_store,Options.Create(_options),clock,NullLogger<PlayModeCoordinator>.Instance);
+        await modes.InitializeAsync(TestContext.Current.CancellationToken);
+        await modes.EnterPlayModeAsync(TestContext.Current.CancellationToken);
+        clock.Advance(TimeSpan.FromMinutes(2));
+
+        Assert.Equal("work",(await modes.GetStatusAsync(TestContext.Current.CancellationToken)).Mode);
+    }
+
     private static NotificationEventRequest Event(string key)=>new("test","test.event","warning","attention","Safe notification",null,key,DateTimeOffset.UtcNow,DateTimeOffset.UtcNow.AddHours(1),null,null,null);
+
+    private sealed class ManualTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        private DateTimeOffset _now=now;
+        public override DateTimeOffset GetUtcNow()=>_now;
+        public void Advance(TimeSpan duration)=>_now+=duration;
+    }
 }

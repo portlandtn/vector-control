@@ -63,12 +63,20 @@ public sealed class VectorClient(HttpClient client, IOptions<NotifierOptions> op
     }
 }
 
-public sealed class NotificationWorker(EventStore store,VectorClient vector,EventProcessor processor,ILogger<NotificationWorker> logger):BackgroundService
+public sealed class NotificationWorker(EventStore store,VectorClient vector,EventProcessor processor,PlayModeCoordinator modes,ILogger<NotificationWorker> logger):BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
         while(!ct.IsCancellationRequested) {
-            try { var item=await store.ClaimNextAsync(!processor.IsQuiet(TimeProvider.System.GetUtcNow()),ct); if(item is null) { await Task.Delay(500,ct); continue; } var sw=Stopwatch.StartNew(); var result=await vector.DeliverAsync(item,ct); await store.CompleteAsync(item.Id,result,ct); logger.LogInformation("Notification {Source} {EventType} {DedupeKey} delivery {Outcome} in {ElapsedMs}ms",item.Source,item.EventType,item.DedupeKey,result.Success?"delivered":"queued_vector_unavailable",sw.ElapsedMilliseconds); if(!result.Success) await Task.Delay(5000,ct); }
+            try {
+                var hadWork=await modes.RunNotificationIterationAsync(async () => {
+                    var item=await store.ClaimNextAsync(!processor.IsQuiet(TimeProvider.System.GetUtcNow()),ct); if(item is null) return;
+                    var sw=Stopwatch.StartNew(); var result=await vector.DeliverAsync(item,ct); await store.CompleteAsync(item.Id,result,ct);
+                    logger.LogInformation("Notification {Source} {EventType} {DedupeKey} delivery {Outcome} in {ElapsedMs}ms",item.Source,item.EventType,item.DedupeKey,result.Success?"delivered":"queued_vector_unavailable",sw.ElapsedMilliseconds);
+                    if(!result.Success) await Task.Delay(5000,ct);
+                },ct);
+                if(!hadWork) await Task.Delay(500,ct); else await Task.Delay(100,ct);
+            }
             catch(OperationCanceledException) when(ct.IsCancellationRequested) { break; } catch(Exception ex) { logger.LogError(ex,"Notification worker iteration failed"); await Task.Delay(1000,ct); }
         }
     }

@@ -29,6 +29,8 @@ public sealed class EventStore(IOptions<NotifierOptions> options, TimeProvider c
             CREATE INDEX IF NOT EXISTS ix_events_status ON events(status, id);
             CREATE TABLE IF NOT EXISTS states (
               state_key TEXT PRIMARY KEY, state TEXT NOT NULL, updated_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS runtime_state (
+              key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
             """, ct);
     }
 
@@ -115,6 +117,21 @@ public sealed class EventStore(IOptions<NotifierOptions> options, TimeProvider c
 
     public async Task CompleteAsync(long id, DeliveryResult result, CancellationToken ct)
     { await using var db=await OpenAsync(ct); await using var cmd=db.CreateCommand(); cmd.CommandText="UPDATE events SET status=$status,result=$result WHERE id=$id"; Add(cmd,"$status",result.Success?"delivered":"pending"); Add(cmd,"$result",result.Success?"ok":"vector_unavailable_queued"); Add(cmd,"$id",id); await cmd.ExecuteNonQueryAsync(ct); }
+
+    public async Task<string?> GetRuntimeStateAsync(string key, CancellationToken ct = default)
+    {
+        await using var db=await OpenAsync(ct); await using var cmd=db.CreateCommand();
+        cmd.CommandText="SELECT value FROM runtime_state WHERE key=$key"; Add(cmd,"$key",key);
+        return (string?)await cmd.ExecuteScalarAsync(ct);
+    }
+
+    public async Task SetRuntimeStateAsync(string key, string value, CancellationToken ct = default)
+    {
+        await using var db=await OpenAsync(ct); await using var cmd=db.CreateCommand();
+        cmd.CommandText="INSERT INTO runtime_state(key,value,updated_at) VALUES($key,$value,$at) ON CONFLICT(key) DO UPDATE SET value=$value,updated_at=$at";
+        Add(cmd,"$key",key); Add(cmd,"$value",value); Add(cmd,"$at",clock.GetUtcNow().ToString("O"));
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
 
     public async Task CleanupAsync(CancellationToken ct)
     { await using var db=await OpenAsync(ct); await using var cmd=db.CreateCommand(); cmd.CommandText="DELETE FROM events WHERE created_at < $events; DELETE FROM states WHERE updated_at < $states; UPDATE events SET status='expired' WHERE status IN ('pending','queued_quiet') AND expires_at <= $now"; Add(cmd,"$events",clock.GetUtcNow().AddHours(-_options.DedupeRetentionHours).ToString("O")); Add(cmd,"$states",clock.GetUtcNow().AddDays(-_options.StateRetentionDays).ToString("O")); Add(cmd,"$now",clock.GetUtcNow().ToString("O")); await cmd.ExecuteNonQueryAsync(ct); }

@@ -11,6 +11,9 @@ Producers classify events and send safe spoken text. The API validates and suppr
 - `POST /github/webhook` — compatible GitHub webhook; requires a valid `X-Hub-Signature-256`.
 - `GET /health/live` — process liveness.
 - `GET /health/ready` — reports API, SQLite, and current Wire-Pod reachability; degraded readiness is HTTP 503.
+- `GET /vector/mode` — reports the persisted `work` or `play` mode; requires `X-Api-Key`.
+- `POST /vector/mode/play` — starts a timed Izzy play session and pauses notification delivery.
+- `POST /vector/mode/work` — stops play mode and resumes queued notification delivery.
 
 `/vector/events` returns 202 for persisted work and 200 for intentional suppression (`duplicate`, `expired`, `quiet_hours`, `unchanged_state`, `sensitive_content`, `event_disabled`, or `quiet_queue_full`). Invalid requests return 400 and bad API keys return 401. Secrets and metadata are never logged.
 
@@ -38,6 +41,28 @@ Required: `source`, `eventType`, `severity`, `emotion`, `message`, and `dedupeKe
 Dedupe keys survive restarts for `DedupeRetentionHours`. Expired events never speak. America/Chicago quiet hours queue noncritical events by default, up to `MaximumQueuedNotifications`; critical events bypass them. Only unexpired queued items are released. State events announce changes and suppress unchanged state, so `healthy → unhealthy` and `unhealthy → healthy` speak while repeated states do not. Cleanup runs hourly.
 
 Choose stable state keys such as `cloudflared.service`, `github:repo:workflow:CI`, or `openclaw.model`. Dedupe keys identify one occurrence and should differ on a real transition.
+
+## Izzy play mode
+
+Play mode is a bounded, local activity mode. Vector welcomes Izzy and periodically chooses from the configured `Notifier:PlayMode:Prompts`. The prompts are curated strings; this service does not record microphone audio, send child data to an AI provider, maintain a child profile, or issue wheel commands. After `SessionMinutes` it automatically returns to work mode.
+
+While play mode is active, the notification worker does not claim events. Pending and quiet-hour events stay in SQLite and resume in order after work mode returns. A mode transition waits for any notification already speaking to finish, so a hook cannot race the play-mode activation.
+
+Wire-Pod custom intents provide the voice commands:
+
+- `Hey Vector, go play with Izzy`
+- `Hey Vector, enter work mode`
+
+Set a separate random secret in both services, then run the idempotent intent installer from a machine that can reach Wire-Pod:
+
+```bash
+export VECTOR_PLAY_INTENT_TOKEN='<separate-random-secret>'
+export WIREPOD_BASE_URL='http://192.168.50.205:8080'
+export VECTOR_NOTIFIER_CALLBACK_URL='http://<notifier-lan-address>:5055'
+bash wirepod/install-play-mode-intents.sh
+```
+
+`VECTOR_NOTIFIER_CALLBACK_URL` must be reachable from the Wire-Pod process or container. The installer stores the shared token in Wire-Pod's local custom-intent configuration; it is never committed here. API-key-authenticated clients can also switch modes without the intent token.
 
 AgentMail additionally blocks messages containing common high-risk phrases such as verification codes, credentials, account/routing numbers, and medical records. This is defense in depth: the producer must never send raw bodies, codes, account/loan details, credentials, medical or financial data. Use only a display name and a short safe summary.
 
@@ -83,8 +108,11 @@ Required environment variables:
 | `VECTOR_NOTIFIER_DB` | SQLite path; default `data/notifier.db` |
 | `WIREPOD_BASE_URL` | Overrides Wire-Pod URL |
 | `VECTOR_SERIAL` | Overrides robot serial |
+| `VECTOR_PLAY_INTENT_TOKEN` | Shared secret used only by the two Wire-Pod mode intents |
 
 `appsettings.json` documents typed `Notifier` settings: timezone, quiet-hour start/end and behavior (`queue` or `suppress`), critical bypass, queue maximum, retention, cooldown, event switches, Slipbox threshold, humor settings, shipment and imminent-meeting switches, Wire-Pod timings, and `EmotionAnimations`.
+
+`Notifier:PlayMode` controls the session duration and prompt interval. `WelcomePhrases` and `Prompts` can be replaced through configuration; at least one of each is required. The prompt interval has a 10-second minimum.
 
 Animation identifiers differ between robot firmware/Wire-Pod installations. Defaults are intentionally empty, so every emotion safely falls back to speech. Populate `Notifier:EmotionAnimations:<emotion>` only with identifiers verified on this robot through its installed SDK/Wire-Pod animation list. An unsupported animation logs only the emotion and falls back to speech. No drive or lift commands are issued, which avoids table-edge movement.
 
