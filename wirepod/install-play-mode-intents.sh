@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${WIREPOD_BASE_URL:?Set WIREPOD_BASE_URL, for example http://192.168.50.205:8080}"
+: "${WIREPOD_BASE_URL:?Set WIREPOD_BASE_URL, for example http://127.0.0.1:8080}"
 : "${VECTOR_NOTIFIER_CALLBACK_URL:?Set VECTOR_NOTIFIER_CALLBACK_URL to a URL Wire-Pod can reach}"
 : "${VECTOR_PLAY_INTENT_TOKEN:?Set VECTOR_PLAY_INTENT_TOKEN to the same secret used by vector-notifier}"
 

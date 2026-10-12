@@ -24,7 +24,7 @@ public sealed class NotifierOptions
 
 public sealed class WirePodOptions
 {
-    public string BaseUrl { get; set; } = "http://192.168.50.205:8080";
+    public string BaseUrl { get; set; } = "http://127.0.0.1:8080";
     public string Serial { get; set; } = "007064c9";
     public int AssumeDelayMilliseconds { get; set; } = 300;
     public int SpeechDelayMilliseconds { get; set; } = 1000;

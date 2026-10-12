@@ -57,7 +57,7 @@ Set a separate random secret in both services, then run the idempotent intent in
 
 ```bash
 export VECTOR_PLAY_INTENT_TOKEN='<separate-random-secret>'
-export WIREPOD_BASE_URL='http://192.168.50.205:8080'
+export WIREPOD_BASE_URL='http://127.0.0.1:8080'
 export VECTOR_NOTIFIER_CALLBACK_URL='http://<notifier-lan-address>:5055'
 bash wirepod/install-play-mode-intents.sh
 ```
