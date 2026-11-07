@@ -22,5 +22,19 @@ public sealed class EventProcessorTests : IAsyncLifetime
     [Fact] public async Task PersistenceSurvivesStoreRestart() { await _processor.ProcessAsync(Event("persist"),default); var wrapped=Options.Create(_options); var restarted=new EventStore(wrapped,TimeProvider.System,NullLogger<EventStore>.Instance); await restarted.InitializeAsync(); var processor=new EventProcessor(restarted,wrapped,TimeProvider.System,NullLogger<EventProcessor>.Instance); Assert.Equal("duplicate",(await processor.ProcessAsync(Event("persist"),default)).Reason); }
     [Fact] public async Task QuietHoursQueuesNoncriticalAndBypassesCritical() { _options.QuietHoursStart=new(0,0); _options.QuietHoursEnd=new(23,59); Assert.Equal("quiet_hours",(await _processor.ProcessAsync(Event("quiet"),default)).Reason); Assert.Null((await _processor.ProcessAsync(Event("critical") with { Severity="critical" },default)).Reason); }
 
+    [Theory]
+    [InlineData("other-producer","verification-code: 123456")]
+    [InlineData("AGENTMAIL","p\u200bassword: synthetic")]
+    [InlineData("github","MEDICAL record: synthetic")]
+    public async Task SensitiveTextSuppressedAcrossProducers(string source,string message)
+    { Assert.Equal("sensitive_content",(await _processor.ProcessAsync(Event("synthetic") with {Source=source,Message=message},default)).Reason); }
+    [Fact] public async Task UntrustedFieldsNeverReachStoredEnvelope()
+    {
+        var e=Event("private-key-fixture") with {Source="private-source-fixture",EventType="private-type-fixture",Message="private-message-fixture",Summary="private-summary-fixture",StateKey="private-state-key",State="private-state",Metadata=new(){{"sensitive",System.Text.Json.JsonSerializer.SerializeToElement("private-metadata-fixture")}}};
+        Assert.True((await _processor.ProcessAsync(e,default)).Accepted);
+        var saved=await _store.ClaimNextAsync(true,default);Assert.NotNull(saved);
+        Assert.Equal(NotificationPrivacy.Generic,saved.Message);Assert.Equal("external",saved.Source);Assert.Equal("notification.update",saved.EventType);
+        foreach(var canary in new[]{"private-key-fixture","private-source-fixture","private-type-fixture","private-message-fixture","private-summary-fixture","private-state-key","private-state","private-metadata-fixture"}) Assert.DoesNotContain(canary,System.Text.Json.JsonSerializer.Serialize(saved));
+    }
     private static NotificationEventRequest Event(string key)=>new("test","test.event","warning","attention","Safe notification",null,key,DateTimeOffset.UtcNow,DateTimeOffset.UtcNow.AddHours(1),null,null,null);
 }

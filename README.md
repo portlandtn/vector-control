@@ -113,3 +113,11 @@ sudo systemctl status vector-notifier
 Put required variables in `/etc/vector-notifier.env` as `NAME=value`. The unit runs as `vector-notifier`; create that system user and ensure `/opt/vector-notifier` is readable. `StateDirectory=vector-notifier` creates `/var/lib/vector-notifier` for SQLite.
 
 Troubleshoot with `curl -i http://127.0.0.1:5055/health/ready` and `journalctl -u vector-notifier -n 100 --no-pager`. A 503 with `storage:false` indicates path/permission trouble; `vector:false` means Wire-Pod/Vector is unreachable while the API remains alive and persisted events remain queued. GitHub 401 means the configured secret, raw request body, or signature differs.
+
+## Producer-independent private announcements
+
+Queued speech now uses a small server-owned template selected by event type. Free-form messages, summaries, metadata, repository titles and other provider text are not spoken. Unknown types use “An update is available. Check your private dashboard.” Source/type fields are minimized, dedupe/state values are hashed, and summary/metadata are discarded before storage. Phrase checks normalize Unicode/punctuation and apply to every producer; they are defense in depth, not the privacy guarantee. The guarantee is that only fixed templates reach speech, including previously queued records.
+
+`/vector/say` now accepts only that exact generic template; arbitrary speech is intentionally rejected. Use typed events for supported summaries. API success responses do not echo text. The Wire-Pod HTTP client's built-in loggers are removed; application decision/delivery logs omit producer text and identifiers. This reduces detail in existing announcements and requires producer compatibility review before rollout. Historical database/log content is not rewritten or claimed erased. Hashes preserve dedupe semantics but are not encryption; do not treat them as a secure way to retain sensitive source content.
+
+Tests use fake HTTP handlers and disposable synthetic SQLite state; no robot command is sent. End-to-end proxy/access-log retention and existing stored events require separate deployment review.

@@ -15,7 +15,7 @@ builder.Services.PostConfigure<NotifierOptions>(o =>
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<EventStore>();
 builder.Services.AddSingleton<EventProcessor>();
-builder.Services.AddHttpClient<VectorClient>((sp,client) => client.BaseAddress=new Uri(sp.GetRequiredService<IOptions<NotifierOptions>>().Value.WirePod.BaseUrl));
+builder.Services.AddHttpClient<VectorClient>((sp,client) => client.BaseAddress=new Uri(sp.GetRequiredService<IOptions<NotifierOptions>>().Value.WirePod.BaseUrl)).RemoveAllLoggers();
 builder.Services.AddHostedService<NotificationWorker>();
 builder.Services.AddHostedService<CleanupWorker>();
 
@@ -39,10 +39,10 @@ app.MapPost("/vector/events",async (HttpRequest http,NotificationEventRequest re
 app.MapPost("/vector/say",async (HttpRequest http,SayRequest request,VectorClient vector,CancellationToken ct) =>
 {
     if(!Authorized(http)) return Results.Unauthorized();
-    if(string.IsNullOrWhiteSpace(request.Text)) return Results.BadRequest(new { error="Text is required." });
+    if(request.Text != NotificationPrivacy.Generic) return Results.BadRequest(new { error="Only the approved generic notification text is supported. Use typed events for other safe summaries." });
     var envelope=new NotificationEnvelope(0,"manual","vector.say","info","quiet",request.Text,"manual",null,null,DateTimeOffset.UtcNow);
     var result=await vector.DeliverAsync(envelope,ct);
-    return result.Success ? Results.Ok(new { success=true,spoken=request.Text }) : Results.Problem(title:"Vector communication failed",detail:"Vector is currently unavailable.",statusCode:502);
+    return result.Success ? Results.Ok(new { success=true }) : Results.Problem(title:"Vector communication failed",detail:"Vector is currently unavailable.",statusCode:502);
 });
 
 app.MapPost("/github/webhook",async (HttpRequest request,EventProcessor processor,CancellationToken ct) =>
