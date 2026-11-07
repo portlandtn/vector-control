@@ -21,22 +21,24 @@ public sealed class EventProcessor(EventStore store, IOptions<NotifierOptions> o
 
     public async Task<EventDecision> ProcessAsync(NotificationEventRequest e, CancellationToken ct)
     {
+        if (Validate(e).Count > 0) return Log(new(false,"suppressed","invalid_event"),e);
         var now=clock.GetUtcNow();
         if (e.ExpiresAt <= now) return Log(new(false,"suppressed","expired"),e);
         if (e.OccurredAt > now.AddMinutes(5)) return Log(new(false,"suppressed","occurred_at_in_future"),e);
         if (_options.Events.TryGetValue(e.EventType!,out var enabled) && !enabled) return Log(new(false,"suppressed","event_disabled"),e);
         if (e.EventType == "package.shipped" && !_options.PackageShipmentAnnouncementsEnabled) return Log(new(false,"suppressed","event_disabled"),e);
         if (e.EventType == "calendar.meeting_imminent" && !_options.MeetingImminentRemindersEnabled) return Log(new(false,"suppressed","event_disabled"),e);
-        if (e.Source!.Equals("agentmail",StringComparison.OrdinalIgnoreCase) && ContainsSensitiveContent(e.Message!)) return Log(new(false,"suppressed","sensitive_content"),e);
+        if (NotificationPrivacy.Sensitive(e.Message!)) return Log(new(false,"suppressed","sensitive_content"),e);
         var quiet=IsQuiet(now) && !(e.Severity!.Equals("critical",StringComparison.OrdinalIgnoreCase)&&_options.CriticalBypassesQuietHours);
         if (quiet && !_options.QuietHoursBehavior.Equals("queue",StringComparison.OrdinalIgnoreCase)) return Log(new(false,"suppressed","quiet_hours"),e);
+        e = NotificationPrivacy.Minimize(e);
         var result=await store.AddAsync(e,quiet?"queued_quiet":"pending",ct); return Log(result,e);
     }
 
     public bool IsQuiet(DateTimeOffset now)
     { var zone=TimeZoneInfo.FindSystemTimeZoneById(_options.TimeZone); var local=TimeOnly.FromDateTime(TimeZoneInfo.ConvertTime(now,zone).DateTime); var start=_options.QuietHoursStart; var end=_options.QuietHoursEnd; return start<=end ? local>=start&&local<end : local>=start||local<end; }
-    private static bool ContainsSensitiveContent(string text) => new[]{"verification code","one-time code","password","credential","account number","routing number","social security","diagnosis","medical record","loan balance"}.Any(x=>text.Contains(x,StringComparison.OrdinalIgnoreCase));
-    private EventDecision Log(EventDecision d,NotificationEventRequest e) { logger.LogInformation("Notification event {Source} {EventType} {Severity} {DedupeKey} emotion {Emotion}: {Outcome} {Reason}",e.Source,e.EventType,e.Severity,e.DedupeKey,e.Emotion,d.Outcome,d.Reason); return d; }
+    private EventDecision Log(EventDecision d,NotificationEventRequest e) { logger.LogInformation("Notification decision {Outcome} {Reason}",d.Outcome,d.Reason); return d; }
+
 }
 
 public sealed class VectorClient(HttpClient client, IOptions<NotifierOptions> options, ILogger<VectorClient> logger)
@@ -56,9 +58,9 @@ public sealed class VectorClient(HttpClient client, IOptions<NotifierOptions> op
                 try { using var animated=await client.PostAsync($"/api-sdk/play_animation?animation={Uri.EscapeDataString(animation)}&serial={serial}",null,ct); if(!animated.IsSuccessStatusCode) logger.LogWarning("Animation unavailable for emotion {Emotion}; using speech fallback",e.Emotion); }
                 catch(HttpRequestException) { logger.LogWarning("Animation unavailable for emotion {Emotion}; using speech fallback",e.Emotion); }
             }
-            using var speech=await client.PostAsync($"/api-sdk/say_text?text={Uri.EscapeDataString(e.Message)}&serial={serial}",null,ct); speech.EnsureSuccessStatusCode();
+            using var speech=await client.PostAsync($"/api-sdk/say_text?text={Uri.EscapeDataString(NotificationPrivacy.Speech(e.EventType))}&serial={serial}",null,ct); speech.EnsureSuccessStatusCode();
             await Task.Delay(_options.WirePod.SpeechDelayMilliseconds,ct); return new(true);
-        } catch(Exception ex) when(ex is HttpRequestException or TaskCanceledException) { logger.LogWarning("Vector delivery unavailable for {Source} {EventType}",e.Source,e.EventType); return new(false,ex.GetType().Name); }
+        } catch(Exception ex) when(ex is HttpRequestException or TaskCanceledException) { logger.LogWarning("Vector delivery unavailable."); return new(false,ex.GetType().Name); }
         finally { if(acquired) try { using var _=await client.PostAsync($"/api-sdk/release_behavior_control?serial={serial}",null,CancellationToken.None); } catch { } _activityLock.Release(); }
     }
 }
@@ -68,7 +70,7 @@ public sealed class NotificationWorker(EventStore store,VectorClient vector,Even
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
         while(!ct.IsCancellationRequested) {
-            try { var item=await store.ClaimNextAsync(!processor.IsQuiet(TimeProvider.System.GetUtcNow()),ct); if(item is null) { await Task.Delay(500,ct); continue; } var sw=Stopwatch.StartNew(); var result=await vector.DeliverAsync(item,ct); await store.CompleteAsync(item.Id,result,ct); logger.LogInformation("Notification {Source} {EventType} {DedupeKey} delivery {Outcome} in {ElapsedMs}ms",item.Source,item.EventType,item.DedupeKey,result.Success?"delivered":"queued_vector_unavailable",sw.ElapsedMilliseconds); if(!result.Success) await Task.Delay(5000,ct); }
+            try { var item=await store.ClaimNextAsync(!processor.IsQuiet(TimeProvider.System.GetUtcNow()),ct); if(item is null) { await Task.Delay(500,ct); continue; } var sw=Stopwatch.StartNew(); var result=await vector.DeliverAsync(item,ct); await store.CompleteAsync(item.Id,result,ct); logger.LogInformation("Notification delivery {Outcome} in {ElapsedMs}ms",result.Success?"delivered":"queued_vector_unavailable",sw.ElapsedMilliseconds); if(!result.Success) await Task.Delay(5000,ct); }
             catch(OperationCanceledException) when(ct.IsCancellationRequested) { break; } catch(Exception ex) { logger.LogError(ex,"Notification worker iteration failed"); await Task.Delay(1000,ct); }
         }
     }
